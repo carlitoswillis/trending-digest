@@ -1,0 +1,27 @@
+name: Weekly trending digest
+
+on:
+  schedule:
+    - cron: "30 15 * * 1" # Mondays 15:30 UTC = 8:30am ET / 7:30am PT-ish year round
+  workflow_dispatch: {}
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build digest HTML
+        run: python3 scripts/build_digest.py
+
+      - name: Send email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          to: ${{ secrets.MAIL_USERNAME }}
+          from: Trending Digest <${{ secrets.MAIL_USERNAME }}>
+          subject: "GitHub Trending — weekly digest"
+          html_body: file://digest.html
