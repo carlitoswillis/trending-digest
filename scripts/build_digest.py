@@ -10,12 +10,9 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 FEEDS = [
-    ("Overall", "https://mshibanami.github.io/GitHubTrendingRSS/weekly/all.xml"),
-    ("TypeScript", "https://mshibanami.github.io/GitHubTrendingRSS/weekly/typescript.xml"),
-    ("Python", "https://mshibanami.github.io/GitHubTrendingRSS/weekly/python.xml"),
-    ("Swift", "https://mshibanami.github.io/GitHubTrendingRSS/weekly/swift.xml"),
+    ("This week", "https://mshibanami.github.io/GitHubTrendingRSS/weekly/all.xml"),
 ]
-PER_FEED = 10
+PER_FEED = 25
 
 def fetch_items(url):
     with urllib.request.urlopen(url, timeout=30) as r:
