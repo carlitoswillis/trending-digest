@@ -52,7 +52,20 @@ def main():
     )
     with open("digest.html", "w") as f:
         f.write(body)
-    print(f"wrote digest.html ({len(body)} bytes)")
+    md = ["# GitHub Trending — weekly\n"]
+    for name, url in FEEDS:
+        try:
+            items = fetch_items(url)
+        except Exception as e:
+            md.append(f"## {name}\n\n_feed error: {e}_\n")
+            continue
+        md.append(f"## {name}\n")
+        for title, link, desc in items:
+            md.append(f"- **[{title}]({link})** — {desc}")
+        md.append("")
+    with open("digest.md", "w") as f:
+        f.write("\n".join(md))
+    print(f"wrote digest.html ({len(body)} bytes) and digest.md")
 
 if __name__ == "__main__":
     sys.exit(main())
