@@ -391,8 +391,14 @@ def main():
     except Exception as e:
         log(f"warning: could not fetch prior digests ({type(e).__name__}: {e}); treating every repo as new")
         issues = []
-    # A re-run on the same day must not count today's own digest as history.
-    digests = [parse_digest(i["body"]) for i in issues if not i["title"].endswith(today)]
+    # A re-run on the same day must not count today's own digest as history, and a
+    # day that was run twice in the past counts once (newest issue wins).
+    digests, seen_titles = [], set()
+    for issue in issues:
+        if issue["title"].endswith(today) or issue["title"] in seen_titles:
+            continue
+        seen_titles.add(issue["title"])
+        digests.append(parse_digest(issue["body"]))
 
     classify(repos, digests)
     text = render(repos, today)
