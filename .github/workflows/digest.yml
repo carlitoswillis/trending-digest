@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build digest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/build_digest.py
 
       - name: File digest as issue (GitHub emails the notification)
@@ -23,7 +25,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Trending digest — $(date -u '+%Y-%m-%d')"
-          gh issue create --title "$title" --body-file digest.md --assignee carlitoswillis --repo "$GITHUB_REPOSITORY"
+          gh issue create --title "$title" --body-file digest.md --repo "$GITHUB_REPOSITORY"
           # keep the repo tidy: close digests older than the newest 8
           gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "Trending digest" \
             --json number --jq '.[8:][].number' | while read -r n; do
