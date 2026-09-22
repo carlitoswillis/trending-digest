@@ -66,11 +66,11 @@ jobs:
           prompt: >-
             Read digest.json and follow the instructions in scripts/brief_prompt.md exactly.
             Write briefs.json in the repository root and nothing else.
-          # The only writable path is briefs.json (Edit(...) rules cover the Write
-          # tool; the Write(...) form is listed too so the rule is found under either
-          # name). `gh api` is the only shell command: the prompt uses no other.
+          # The only writable path is briefs.json: Edit(...) rules govern every
+          # built-in file-editing tool, Write included (code.claude.com/docs/en/permissions).
+          # `gh api` is the only shell command: the prompt uses no other.
           claude_args: >-
-            --allowedTools "Read,Write(briefs.json),Edit(briefs.json),WebFetch,WebSearch,Bash(gh api:*)"
+            --allowedTools "Read,Edit(briefs.json),WebFetch,WebSearch,Bash(gh api:*)"
             --max-turns 300
 
       - name: Fold briefs in
