@@ -3,22 +3,101 @@ name: Weekly trending digest
 on:
   schedule:
     - cron: "30 15 * * 1" # Mondays 15:30 UTC ≈ 8:30am PT
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      analysis:
+        description: "Add Claude research briefs"
+        type: boolean
+        default: true
 
-permissions:
-  issues: write
-  contents: read
-
+# Two jobs so that the research step (Claude reading untrusted READMEs and web
+# pages) never holds a token that can write issues: `build` is read-only and
+# hands digest.md over as an artifact; `file` has issues: write and posts it.
 jobs:
-  send:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read # prior digest issues are the history source
     steps:
       - uses: actions/checkout@v4
 
       - name: Build digest
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/build_digest.py
+        run: |
+          python3 scripts/build_digest.py
+          # keep a copy the research step cannot touch; the fold step renders from it
+          cp digest.json digest.md "$RUNNER_TEMP"/
+
+      - name: Decide whether to research
+        id: gate
+        env:
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          SWITCH: ${{ vars.DIGEST_ANALYSIS }}
+          INPUT: ${{ inputs.analysis }}
+        run: |
+          enabled=true
+          reason="research enabled: OAuth token present, DIGEST_ANALYSIS is not 'off', analysis input is not false"
+          if [ "$HAS_TOKEN" != "true" ]; then
+            enabled=false
+            reason="research skipped: repo secret CLAUDE_CODE_OAUTH_TOKEN is not set"
+          elif [ "$SWITCH" = "off" ]; then
+            enabled=false
+            reason="research skipped: repo variable DIGEST_ANALYSIS is 'off'"
+          elif [ "$INPUT" = "false" ]; then
+            enabled=false
+            reason="research skipped: manual run with the 'Add Claude research briefs' checkbox off"
+          fi
+          echo "$reason"
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+      - name: Research
+        id: research
+        if: steps.gate.outputs.enabled == 'true'
+        continue-on-error: true
+        timeout-minutes: 25
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }} # read-only in this job; lets `gh api` GETs avoid rate limits
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: >-
+            Read digest.json and follow the instructions in scripts/brief_prompt.md exactly.
+            Write briefs.json in the repository root and nothing else.
+          # The only writable path is briefs.json (Edit(...) rules cover the Write
+          # tool; the Write(...) form is listed too so the rule is found under either
+          # name). `gh api` is the only shell command: the prompt uses no other.
+          claude_args: >-
+            --allowedTools "Read,Write(briefs.json),Edit(briefs.json),WebFetch,WebSearch,Bash(gh api:*)"
+            --max-turns 300
+
+      - name: Fold briefs in
+        if: steps.gate.outputs.enabled == 'true'
+        continue-on-error: true # a failed fold still files the build's digest.md
+        run: |
+          # render only from the build's own inputs: tracked files as checked out,
+          # digest.json as built, whatever the research step did to the workspace
+          git checkout -- .
+          cp "$RUNNER_TEMP"/digest.json "$RUNNER_TEMP"/digest.md .
+          python3 scripts/build_digest.py render --briefs briefs.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest
+          path: digest.md
+          retention-days: 7
+
+  file:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: digest
 
       - name: File digest as issue (GitHub emails the notification)
         env:

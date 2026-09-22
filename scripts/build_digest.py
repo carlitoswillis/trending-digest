@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """Build the weekly GitHub Trending digest (digest.md).
 
-Stdlib only, Python 3.11+. Reads the GitHubTrendingRSS weekly feed, enriches
-each repo from the GitHub REST API (stars, language, topics, license) and
-compares against prior digest issues in this repository so new repos are
-separated from ones that are still trending. Writes digest.md to the working
-directory; the last line is a machine-readable marker that future runs read
-back to compute star deltas.
+Stdlib only, Python 3.11+. Two modes:
+
+    build_digest.py                          (default) fetch feed + API + history
+    build_digest.py render --briefs FILE     offline: fold research briefs in
+
+The build reads the GitHubTrendingRSS weekly feed, enriches each repo from the
+GitHub REST API (stars, language, license, ...) and compares against prior
+digest issues in this repository so new repos are separated from ones that are
+still trending. It writes digest.json (the data, in feed order) and digest.md
+(no briefs) to the working directory. The last line of digest.md is a
+machine-readable marker that future runs read back to compute star deltas.
+
+The render mode does no network: it reads digest.json and briefs.json and writes
+digest.md again with a one-line brief under each entry that has one. A missing
+or unreadable briefs file is logged and the digest is written without briefs,
+so the issue is never blocked on the research step.
 """
+import argparse
 import html
 import json
 import os
@@ -23,8 +34,15 @@ API = "https://api.github.com"
 DEFAULT_REPOSITORY = "carlitoswillis/trending-digest"
 ISSUE_TITLE_PREFIX = "Trending digest"
 DESC_MAX = 200
-MAX_TOPICS = 5
 API_TIMEOUT = 15
+DIGEST_JSON = "digest.json"
+DIGEST_MD = "digest.md"
+
+# Brief text caps (chars, word-boundary truncation via truncate()).
+WHY_NOW_MAX = 320
+USE_FOR_MAX = 200
+REASON_MAX = 160
+VERDICTS = ("Try", "Watch", "Skip")
 
 REPO_LINK_RE = re.compile(r"github\.com/([^/]+)/([^/#?\s]+)")
 # Presence in a prior digest is read from entry lines only ("- **[owner/repo](link)**"),
@@ -33,8 +51,22 @@ ENTRY_LINK_RE = re.compile(r"^- \*\*\[[^\]]*\]\((https://github\.com/[^)\s]+)\)"
 # Everything after the feed's tagline paragraph is README markup we do not want.
 FEED_BLOCK_RE = re.compile(r"</?(?:p|br|hr|h[1-6]|div|table|ul|ol|pre|blockquote|img)\b[^>]*>", re.I)
 TRAILING_URL_RE = re.compile(r"\s*https?://\S+$")
-MD_BLOCK_START_RE = re.compile(r"^([-*+#>]|\d+[.)])(?=\s|$)")
+# A backslash escapes the marker character itself ("\-", "\#"); for an ordered
+# list it must go before the "." or ")" since "\1" is not a CommonMark escape.
+MD_BLOCK_START_RE = re.compile(r"^([-*+#>])(?=\s|$)")
+MD_ORDERED_START_RE = re.compile(r"^(\d+)([.)])(?=\s|$)")
 MARKER_RE = re.compile(r"<!--\s*digest-data\s+(\{.*\})\s*-->\s*$", re.S)
+MD_UNDERSCORE_RE = re.compile(r"(?<!\w)_|_(?!\w)")
+MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+BARE_URL_RE = re.compile(r"\s*(?:https?://|www\.)\S+")
+# GitHub autolinks @user and #123 in issue bodies after markdown rendering, so a
+# backslash cannot stop them; a zero-width space after the sigil does, invisibly.
+MENTION_RE = re.compile(r"@(?=\w)")
+ISSUE_REF_RE = re.compile(r"#(?=\d)")
+ZWSP = "​"
+
+# Keys entry_lines()/marker_line() read from every digest.json repo entry.
+RENDER_KEYS = ("name", "link", "archived", "stars", "language", "license", "description", "is_new", "weeks", "delta")
 
 
 def log(msg):
@@ -92,17 +124,39 @@ def tagline_from_feed(raw):
     return truncate(first_sentence(head))
 
 
-def md_escape(s):
+def strip_links(s):
+    """Plain prose only: markdown links keep their text, bare URLs go.
+
+    The repo name is the only link in the digest; a second link in the muted
+    layer (or in a brief) competes with it on the scan. GFM autolinks bare
+    http(s):// and www. URLs, so they are removed rather than escaped.
+    """
+    s = MD_LINK_RE.sub(r"\1", s or "")
+    s = BARE_URL_RE.sub("", s)
+    return clean_text(s).rstrip(" ,;:-—")
+
+
+def md_escape(s, block_start=True):
     """Keep a free-text line from changing the markdown structure around it.
 
     Escapes a leading block marker ("- ", "# ", "> ", "1. " ...) so the description
-    cannot become a nested list, heading or blockquote inside the entry, neutralises
-    backticks (an unbalanced one would swallow the topics line) and anything that
-    looks like an HTML tag or comment (an unclosed "<!--" would hide the rest of the
-    digest up to the marker's "-->").
+    cannot become a nested list, heading or blockquote inside the entry (skipped
+    with block_start=False for text that never starts a line, such as brief
+    fields), neutralises backticks (a code span is reserved for the Try tag),
+    asterisks and word-boundary underscores (bold is reserved for repo names,
+    italics for the brief labels), link brackets and strikethrough tildes, breaks
+    @user and #123 autolinks (a stray @mention in a public issue notifies that
+    user) and anything that looks like an HTML tag or comment (an unclosed "<!--"
+    would hide the rest of the digest up to the marker's "-->"). Intraword
+    underscores (snake_case, URLs) are left alone: they cannot open emphasis in GFM.
     """
-    s = MD_BLOCK_START_RE.sub(r"\\\1", s)
-    s = s.replace("`", "\\`")
+    if block_start:
+        s = MD_BLOCK_START_RE.sub(r"\\\1", s)
+        s = MD_ORDERED_START_RE.sub(r"\1\\\2", s)
+    s = s.replace("`", "\\`").replace("*", "\\*").replace("[", "\\[").replace("~", "\\~")
+    s = MD_UNDERSCORE_RE.sub(r"\\_", s)
+    s = MENTION_RE.sub("@" + ZWSP, s)
+    s = ISSUE_REF_RE.sub("#" + ZWSP, s)
     return re.sub(r"<(?=[/!?A-Za-z])", "&lt;", s)
 
 
@@ -149,7 +203,10 @@ def get_json(url, token=None, timeout=API_TIMEOUT):
 
 
 def fetch_feed(url=FEED_URL):
-    """Return up to MAX_REPOS feed items as dicts: owner, repo, name, link, feed_text."""
+    """Return up to MAX_REPOS feed items as dicts: owner, repo, name, link, feed_text, rank.
+
+    rank is the 1-based position in the feed; the digest is rendered in that order.
+    """
     with urllib.request.urlopen(url, timeout=30) as r:
         root = ET.fromstring(r.read())
     items, seen = [], set()
@@ -170,6 +227,7 @@ def fetch_feed(url=FEED_URL):
             "name": name,
             "link": f"https://github.com/{name}",
             "feed_text": item.findtext("description") or "",
+            "rank": len(items) + 1,
         })
         if len(items) >= MAX_REPOS:
             break
@@ -297,22 +355,83 @@ def classify(repos, digests):
                     break
 
 
+# ------------------------------------------------------------------------ briefs
+
+
+def brief_text(value, limit):
+    """One-line, escaped, capped brief field; "" when the value is unusable."""
+    if not isinstance(value, str):
+        return ""
+    # Brief fields follow a run-in label mid-line, so a leading "- " or "1. " can
+    # never open a block there; only the inline escapes apply.
+    return md_escape(truncate(strip_links(value), limit), block_start=False)
+
+
+def clean_brief(name, raw):
+    """Validate one briefs.json entry; None (with a log line) when it must be dropped."""
+    if not isinstance(raw, dict):
+        log(f"briefs: {name}: ignoring non-object entry")
+        return None
+    verdict = raw.get("verdict")
+    verdict = verdict.strip() if isinstance(verdict, str) else verdict
+    if verdict not in VERDICTS:
+        log(f"briefs: {name}: dropping brief with invalid verdict {verdict!r} (expected one of {', '.join(VERDICTS)})")
+        return None
+    return {
+        "why_now": brief_text(raw.get("why_now"), WHY_NOW_MAX),
+        "use_for": brief_text(raw.get("use_for"), USE_FOR_MAX),
+        "verdict": verdict,
+        "reason": brief_text(raw.get("reason"), REASON_MAX),
+    }
+
+
+def load_briefs(path, names=()):
+    """Read briefs.json into {lowercased "owner/repo": brief}. Never raises.
+
+    Any problem with the file as a whole (missing, unreadable, not JSON, not an
+    object) is logged and yields {} so the digest still ships without briefs.
+    Unknown repo keys are logged and ignored.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        log(f"briefs: {path} not found; rendering without briefs")
+        return {}
+    except (OSError, ValueError) as e:
+        log(f"briefs: could not read {path} ({type(e).__name__}: {e}); rendering without briefs")
+        return {}
+    if not isinstance(data, dict):
+        log(f"briefs: {path} is not a JSON object; rendering without briefs")
+        return {}
+    known = {n.lower() for n in names}
+    briefs = {}
+    for name, raw in data.items():
+        key = str(name).strip().lower()
+        if known and key not in known:
+            log(f"briefs: ignoring unknown repo {name!r}")
+            continue
+        brief = clean_brief(name, raw)
+        if brief is not None:
+            briefs[key] = brief
+    return briefs
+
+
 # ------------------------------------------------------------------------ render
 
 
-def star_key(r):
-    return (r["stars"] is None, -(r["stars"] or 0), r["name"].lower())
+def rank_key(r):
+    return (r.get("rank") is None, r.get("rank") or 0, r["name"].lower())
 
 
-def group_by_language(repos):
-    groups = {}
-    for r in repos:
-        groups.setdefault(r["language"] or "Other", []).append(r)
-    order = sorted(groups.items(), key=lambda kv: (kv[0] == "Other", -len(kv[1]), kv[0].lower()))
-    return [(lang, sorted(group, key=star_key)) for lang, group in order]
+def entry_lines(r, brief=None):
+    """The lines for one repo: entry line, optional description, optional brief.
 
-
-def entry_lines(r, new):
+    Entry line: bold name (the only bold in the body), "(archived)", then the plain
+    metadata "stars (+delta) · language · license · Nth week" with unavailable
+    segments omitted, then the `Try` tag (the only code span) when the brief says so.
+    """
+    new = r["is_new"]
     name = f"**[{r['name']}]({r['link']})**"
     if r["archived"]:
         name += " (archived)"
@@ -322,20 +441,38 @@ def entry_lines(r, new):
         if not new and r["delta"] is not None:
             s += f" ({fmt_delta(r['delta'])})"
         meta.append(s)
-    if new:
-        if r["license"]:
-            meta.append(r["license"])
-    else:
+    if r["language"]:
+        meta.append(r["language"])
+    if r["license"]:
+        meta.append(r["license"])
+    if not new:
         meta.append(f"{ordinal(r['weeks'])} week")
-        if r["language"]:
-            meta.append(r["language"])
-    lines = [f"- {name}" + (" — " + " · ".join(meta) if meta else "")]
-    description = md_escape(truncate(r["description"] or ""))
+    line = f"- {name}"
+    if meta:
+        line += " — " + " · ".join(meta)
+    if brief and brief["verdict"] == "Try":
+        line += " `Try`"
+    lines = [line]
+    description = md_escape(truncate(strip_links(r["description"])))
     if description:
         lines.append("  " + description)
-    if new and r["topics"]:
-        lines.append("  " + " ".join(f"`{t}`" for t in r["topics"][:MAX_TOPICS]))
+    if brief:
+        lines.append("  " + brief_line(brief))
     return lines
+
+
+def brief_line(brief):
+    """One blockquote line with the three run-in italic labels."""
+    parts = []
+    if brief["why_now"]:
+        parts.append(f"*Why now.* {brief['why_now']}")
+    if brief["use_for"]:
+        parts.append(f"*Use it for.* {brief['use_for']}")
+    verdict = brief["verdict"]
+    if brief["reason"]:
+        verdict += f" — {brief['reason']}"
+    parts.append(f"*Verdict.* {verdict}")
+    return "> " + " ".join(parts)
 
 
 def marker_line(repos, date):
@@ -343,35 +480,40 @@ def marker_line(repos, date):
     return "<!-- digest-data " + json.dumps(data, sort_keys=True, separators=(",", ":")) + " -->"
 
 
-def render(repos, date):
+def plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def render(repos, date, briefs=None):
+    """digest.md body: standfirst, the two ranked sections, the marker line last.
+
+    Both sections keep GitHub Trending feed order (rank). Lists are tight; there is
+    one blank line before each heading and before the marker.
+    """
+    briefs = briefs or {}
+    repos = sorted(repos, key=rank_key)
     new = [r for r in repos if r["is_new"]]
-    returning = sorted((r for r in repos if not r["is_new"]), key=star_key)
-    out = [
-        f"# GitHub Trending — week of {date}",
-        "",
-        f"**{len(repos)} repos** · {len(new)} new · {len(returning)} still trending",
-        "",
-    ]
-    if new:
-        out += ["## New this week", ""]
-        for lang, group in group_by_language(new):
-            out.append(f"### {lang} ({len(group)})")
-            for r in group:
-                out += entry_lines(r, new=True)
-            out.append("")
-    if returning:
-        out.append("## Still trending")
-        for r in returning:
-            out += entry_lines(r, new=False)
-        out.append("")
-    out.append(marker_line(repos, date))
+    returning = [r for r in repos if not r["is_new"]]
+    out = [f"{plural(len(repos), 'repo')} on GitHub Trending this week · {len(new)} new · {len(returning)} still trending"]
+    for heading, group in (("## New this week", new), ("## Still trending", returning)):
+        if not group:
+            continue
+        out += ["", heading]
+        for r in group:
+            out += entry_lines(r, briefs.get(r["name"].lower()))
+    out += ["", marker_line(repos, date)]
     return "\n".join(out) + "\n"
 
 
 # -------------------------------------------------------------------------- main
 
 
-def main():
+def write_text(path, text):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def build():
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or None
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -401,17 +543,62 @@ def main():
         digests.append(parse_digest(issue["body"]))
 
     classify(repos, digests)
-    text = render(repos, today)
-    with open("digest.md", "w", encoding="utf-8") as f:
-        f.write(text)
+    # digest.json is the input to the research step and to `render`; the raw feed
+    # HTML is the one field nobody downstream needs.
+    data = {"date": today, "repos": [{k: v for k, v in r.items() if k != "feed_text"} for r in repos]}
+    write_text(DIGEST_JSON, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    write_text(DIGEST_MD, render(repos, today))
 
     new = sum(r["is_new"] for r in repos)
     fallbacks = sum(r["fallback"] for r in repos)
     print(
-        f"wrote digest.md: {len(repos)} repos, {new} new, {len(repos) - new} still trending, "
+        f"wrote {DIGEST_MD} and {DIGEST_JSON}: {len(repos)} repos, {new} new, {len(repos) - new} still trending, "
         f"{fallbacks} API fallback(s), {len(digests)} prior digest(s)"
     )
     return 0
+
+
+def render_from_files(briefs_path=None):
+    try:
+        with open(DIGEST_JSON, encoding="utf-8") as f:
+            data = json.load(f)
+        repos, date = data["repos"], data["date"]
+        if not isinstance(repos, list) or not isinstance(date, str):
+            raise ValueError("unexpected shape")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log(f"error: could not read {DIGEST_JSON} ({type(e).__name__}: {e}); run the build first")
+        return 1
+    # A damaged digest.json must fail with one clear line, not a traceback, and
+    # must leave the build's digest.md in place (the workflow files that instead).
+    for i, r in enumerate(repos, 1):
+        if not isinstance(r, dict):
+            log(f"error: {DIGEST_JSON} repo #{i} is not an object; run the build first")
+            return 1
+        missing = [k for k in RENDER_KEYS if k not in r]
+        if missing:
+            log(f"error: {DIGEST_JSON} repo #{i} is missing {', '.join(missing)}; run the build first")
+            return 1
+    briefs = load_briefs(briefs_path, [r["name"] for r in repos]) if briefs_path else {}
+    try:
+        text = render(repos, date, briefs)
+    except Exception as e:  # a field of the wrong type, say; digest.md is untouched
+        log(f"error: could not render {DIGEST_JSON} ({type(e).__name__}: {e}); run the build first")
+        return 1
+    write_text(DIGEST_MD, text)
+    print(f"wrote {DIGEST_MD}: {len(repos)} repos, {len(briefs)} brief(s)")
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("build", help="fetch feed, API and history; write digest.json and digest.md (default)")
+    rp = sub.add_parser("render", help="offline: re-render digest.md from digest.json, folding briefs in")
+    rp.add_argument("--briefs", metavar="FILE", help="briefs.json written by the research step")
+    args = parser.parse_args(argv)
+    if args.command == "render":
+        return render_from_files(args.briefs)
+    return build()
 
 
 if __name__ == "__main__":
