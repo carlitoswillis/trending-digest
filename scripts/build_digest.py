@@ -26,7 +26,7 @@ import re
 import sys
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 FEED_URL = "https://mshibanami.github.io/GitHubTrendingRSS/weekly/all.xml"
 MAX_REPOS = 25
@@ -339,6 +339,17 @@ def parse_digest(body):
     return {"present": present, "stars": stars, "date": date}
 
 
+def digest_week(text):
+    """ISO (year, week) of the YYYY-MM-DD that ends a digest title; the text itself if none."""
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})\s*$", text or "")
+    if not m:
+        return text
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isocalendar()[:2]
+    except ValueError:
+        return text
+
+
 def classify(repos, digests):
     """Annotate each repo with is_new, weeks and delta. digests is newest first."""
     for r in repos:
@@ -533,13 +544,16 @@ def build():
     except Exception as e:
         log(f"warning: could not fetch prior digests ({type(e).__name__}: {e}); treating every repo as new")
         issues = []
-    # A re-run on the same day must not count today's own digest as history, and a
-    # day that was run twice in the past counts once (newest issue wins).
-    digests, seen_titles = [], set()
+    # History is one digest per ISO week: a re-run this week must not count this
+    # week's earlier digest as history, and a past week that was run twice counts
+    # once (newest issue wins; issues arrive newest first).
+    this_week = digest_week(today)
+    digests, seen_weeks = [], set()
     for issue in issues:
-        if issue["title"].endswith(today) or issue["title"] in seen_titles:
+        week = digest_week(issue["title"])
+        if week == this_week or week in seen_weeks:
             continue
-        seen_titles.add(issue["title"])
+        seen_weeks.add(week)
         digests.append(parse_digest(issue["body"]))
 
     classify(repos, digests)

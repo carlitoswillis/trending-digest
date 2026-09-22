@@ -603,6 +603,31 @@ try:
 finally:
     ISSUES.pop(1)
 
+# ============================================ 5c. earlier digest this ISO week ignored
+print("== a digest earlier this ISO week does not count as history ==")
+_monday = NOW - timedelta(days=NOW.weekday())
+SAME_WEEK = (_monday if _monday.strftime("%Y-%m-%d") != TODAY else _monday + timedelta(days=1)).strftime("%Y-%m-%d")
+ISSUES.insert(0, {"number": 9, "title": f"Trending digest — {SAME_WEEK}", "body": ISSUE_6_BODY.replace(D3, SAME_WEEK), "created_at": f"{SAME_WEEK}T00:00:00Z"})
+try:
+    with run_main(env={}) as r:
+        check(r["rc"] == 0 and "10 repos on GitHub Trending this week · 6 new · 4 still trending" in r["text"], "counts unchanged with a same-week issue present")
+        check("3 prior digest(s)" in r["stdout"] and "TypeScript · 3rd week" in r["text"], "same-week issue excluded from history; week counts unchanged")
+finally:
+    ISSUES.pop(0)
+
+# ===================================== 5d. two digests in one past week count once
+print("== two digests on different days of one past week count once ==")
+D1_NEXT = (NOW - timedelta(days=6)).strftime("%Y-%m-%d")
+ISSUES.insert(0, {"number": 10, "title": f"Trending digest — {D1_NEXT}", "body": ISSUE_8_BODY, "created_at": f"{D1_NEXT}T23:00:00Z"})
+try:
+    with run_main(env={}) as r:
+        check(r["rc"] == 0 and "3 prior digest(s)" in r["stdout"] and "TypeScript · 3rd week" in r["text"], "second digest in a past week counted once")
+finally:
+    ISSUES.pop(0)
+check(bd.digest_week("Trending digest — 2026-09-21") == bd.digest_week("Trending digest — 2026-09-22") == (2026, 39), "same ISO week")
+check(bd.digest_week("Trending digest — 2026-09-20") == (2026, 38), "sunday belongs to the previous ISO week")
+check(bd.digest_week("Trending digest — PR") == "Trending digest — PR" and bd.digest_week("x — 2026-13-40") == "x — 2026-13-40", "unparsable titles fall back to the text")
+
 # ================================================================ unit checks
 print("== unit checks ==")
 check([bd.ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111)] ==
