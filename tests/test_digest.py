@@ -205,7 +205,7 @@ def run_main(env=None, **fake_kw):
     fake, calls = make_fake(**fake_kw)
     real = urllib.request.urlopen
     urllib.request.urlopen = fake
-    old_env = {k: os.environ.get(k) for k in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY")}
+    old_env = {k: os.environ.get(k) for k in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY", "DIGEST_PAGE_URL")}
     for k in old_env:
         os.environ.pop(k, None)
     os.environ.update(env or {})
@@ -627,6 +627,16 @@ finally:
 check(bd.digest_week("Trending digest — 2026-09-21") == bd.digest_week("Trending digest — 2026-09-22") == (2026, 39), "same ISO week")
 check(bd.digest_week("Trending digest — 2026-09-20") == (2026, 38), "sunday belongs to the previous ISO week")
 check(bd.digest_week("Trending digest — PR") == "Trending digest — PR" and bd.digest_week("x — 2026-13-40") == "x — 2026-13-40", "unparsable titles fall back to the text")
+
+# ============================================ 5e. web link in the standfirst
+print("== DIGEST_PAGE_URL adds one link at the end of the standfirst ==")
+with run_main(env={"DIGEST_PAGE_URL": "https://example.github.io/trending-digest/"}) as r:
+    first = r["text"].splitlines()[0]
+    check(first.endswith(" · [Read on the web](https://example.github.io/trending-digest/)"), "standfirst ends with the page link")
+    check(first.startswith("10 repos on GitHub Trending this week · 6 new · 4 still trending"), "counts unchanged before the link")
+    check(r["text"].count("Read on the web") == 1, "the link appears once")
+with run_main(env={}) as r:
+    check("Read on the web" not in r["text"], "no link without DIGEST_PAGE_URL")
 
 # ================================================================ unit checks
 print("== unit checks ==")

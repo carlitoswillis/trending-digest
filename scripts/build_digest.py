@@ -369,16 +369,21 @@ def classify(repos, digests):
 # ------------------------------------------------------------------------ briefs
 
 
-def brief_text(value, limit):
-    """One-line, escaped, capped brief field; "" when the value is unusable."""
+def brief_text(value, limit, escape=True):
+    """One-line, capped brief field; "" when the value is unusable.
+
+    Markdown-escaped by default (for digest.md). escape=False keeps plain text for
+    other surfaces, which escape for themselves (the site escapes for HTML).
+    """
     if not isinstance(value, str):
         return ""
+    text = truncate(strip_links(value), limit)
     # Brief fields follow a run-in label mid-line, so a leading "- " or "1. " can
     # never open a block there; only the inline escapes apply.
-    return md_escape(truncate(strip_links(value), limit), block_start=False)
+    return md_escape(text, block_start=False) if escape else text
 
 
-def clean_brief(name, raw):
+def clean_brief(name, raw, escape=True):
     """Validate one briefs.json entry; None (with a log line) when it must be dropped."""
     if not isinstance(raw, dict):
         log(f"briefs: {name}: ignoring non-object entry")
@@ -389,14 +394,14 @@ def clean_brief(name, raw):
         log(f"briefs: {name}: dropping brief with invalid verdict {verdict!r} (expected one of {', '.join(VERDICTS)})")
         return None
     return {
-        "why_now": brief_text(raw.get("why_now"), WHY_NOW_MAX),
-        "use_for": brief_text(raw.get("use_for"), USE_FOR_MAX),
+        "why_now": brief_text(raw.get("why_now"), WHY_NOW_MAX, escape),
+        "use_for": brief_text(raw.get("use_for"), USE_FOR_MAX, escape),
         "verdict": verdict,
-        "reason": brief_text(raw.get("reason"), REASON_MAX),
+        "reason": brief_text(raw.get("reason"), REASON_MAX, escape),
     }
 
 
-def load_briefs(path, names=()):
+def load_briefs(path, names=(), escape=True):
     """Read briefs.json into {lowercased "owner/repo": brief}. Never raises.
 
     Any problem with the file as a whole (missing, unreadable, not JSON, not an
@@ -422,7 +427,7 @@ def load_briefs(path, names=()):
         if known and key not in known:
             log(f"briefs: ignoring unknown repo {name!r}")
             continue
-        brief = clean_brief(name, raw)
+        brief = clean_brief(name, raw, escape)
         if brief is not None:
             briefs[key] = brief
     return briefs
@@ -495,17 +500,21 @@ def plural(n, word):
     return f"{n} {word}" + ("" if n == 1 else "s")
 
 
-def render(repos, date, briefs=None):
+def render(repos, date, briefs=None, page_url=None):
     """digest.md body: standfirst, the two ranked sections, the marker line last.
 
     Both sections keep GitHub Trending feed order (rank). Lists are tight; there is
-    one blank line before each heading and before the marker.
+    one blank line before each heading and before the marker. `page_url` (the
+    GitHub Pages site) adds the one non-repo link, at the end of the standfirst.
     """
     briefs = briefs or {}
     repos = sorted(repos, key=rank_key)
     new = [r for r in repos if r["is_new"]]
     returning = [r for r in repos if not r["is_new"]]
-    out = [f"{plural(len(repos), 'repo')} on GitHub Trending this week · {len(new)} new · {len(returning)} still trending"]
+    standfirst = f"{plural(len(repos), 'repo')} on GitHub Trending this week · {len(new)} new · {len(returning)} still trending"
+    if page_url:
+        standfirst += f" · [Read on the web]({page_url})"
+    out = [standfirst]
     for heading, group in (("## New this week", new), ("## Still trending", returning)):
         if not group:
             continue
@@ -557,11 +566,12 @@ def build():
         digests.append(parse_digest(issue["body"]))
 
     classify(repos, digests)
+    page_url = os.environ.get("DIGEST_PAGE_URL") or None
     # digest.json is the input to the research step and to `render`; the raw feed
     # HTML is the one field nobody downstream needs.
     data = {"date": today, "repos": [{k: v for k, v in r.items() if k != "feed_text"} for r in repos]}
     write_text(DIGEST_JSON, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    write_text(DIGEST_MD, render(repos, today))
+    write_text(DIGEST_MD, render(repos, today, page_url=page_url))
 
     new = sum(r["is_new"] for r in repos)
     fallbacks = sum(r["fallback"] for r in repos)
@@ -594,7 +604,7 @@ def render_from_files(briefs_path=None):
             return 1
     briefs = load_briefs(briefs_path, [r["name"] for r in repos]) if briefs_path else {}
     try:
-        text = render(repos, date, briefs)
+        text = render(repos, date, briefs, page_url=os.environ.get("DIGEST_PAGE_URL") or None)
     except Exception as e:  # a field of the wrong type, say; digest.md is untouched
         log(f"error: could not render {DIGEST_JSON} ({type(e).__name__}: {e}); run the build first")
         return 1

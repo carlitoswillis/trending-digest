@@ -27,8 +27,13 @@ Switch it off (any one of these):
 
 The "Decide whether to research" step logs which of these applied.
 
+## The web version
+
+Each run also records the week under `data/weeks/` and deploys a designed, phone-first page to GitHub Pages with an archive of past weeks. The email's first line links to it. The `publish` job enables Pages on first run; if it fails, enable Pages with source "GitHub Actions" under Settings → Pages. Pages requires the repo to be public on a free plan.
+
 ## Development
 
     python3 tests/test_digest.py
+    python3 tests/test_site.py
 
 `scripts/build_digest.py` builds `digest.json` and `digest.md`; `scripts/build_digest.py render --briefs briefs.json` folds briefs into `digest.md` offline. See `CLAUDE.md` for the digest's design rules.

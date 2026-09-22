@@ -13,4 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run tests
-        run: python3 tests/test_digest.py
+        run: |
+          python3 tests/test_digest.py
+          python3 tests/test_site.py

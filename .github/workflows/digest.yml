@@ -25,6 +25,7 @@ jobs:
       - name: Build digest
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          DIGEST_PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
         run: |
           python3 scripts/build_digest.py
           # keep a copy the research step cannot touch; the fold step renders from it
@@ -76,6 +77,8 @@ jobs:
       - name: Fold briefs in
         if: steps.gate.outputs.enabled == 'true'
         continue-on-error: true # a failed fold still files the build's digest.md
+        env:
+          DIGEST_PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
         run: |
           # render only from the build's own inputs: tracked files as checked out,
           # digest.json as built, whatever the research step did to the workspace
@@ -86,7 +89,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: digest
-          path: digest.md
+          path: |
+            digest.md
+            digest.json
+            briefs.json
           retention-days: 7
 
   file:
@@ -110,3 +116,60 @@ jobs:
             --json number --jq '.[8:][].number' | while read -r n; do
             gh issue close "$n" --repo "$GITHUB_REPOSITORY"
           done
+
+  # Records the week in data/weeks (committed to the branch that ran) and deploys
+  # the site. Independent of `file`; a failure here never blocks the email.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: digest
+          path: build
+
+      - name: Record this week
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ -f build/briefs.json ]; then
+            python3 scripts/build_site.py add build/digest.json --briefs build/briefs.json
+          else
+            python3 scripts/build_site.py add build/digest.json
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/weeks
+          if git diff --cached --quiet; then
+            echo "week already recorded; nothing to commit"
+          else
+            git commit -m "Record digest data for $(date -u '+%Y-%m-%d')"
+            git pull --rebase origin "$BRANCH"
+            git push origin HEAD:"$BRANCH"
+          fi
+
+      - name: Render site
+        run: python3 scripts/build_site.py render --out site
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
