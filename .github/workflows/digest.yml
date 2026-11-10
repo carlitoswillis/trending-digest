@@ -115,8 +115,11 @@ jobs:
           echo "$url"
           echo "url=$url" >> "$GITHUB_OUTPUT"
           # keep the repo tidy: close digests older than the newest 8
-          gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "Trending digest" \
-            --json number --jq '.[8:][].number' | while read -r n; do
+          # explicit sort and title match rather than relying on search/list ordering
+          gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+            --json number,title,createdAt \
+            --jq 'map(select(.title | startswith("Trending digest"))) | sort_by(.createdAt) | reverse | .[8:][].number' \
+            | while read -r n; do
             gh issue close "$n" --repo "$GITHUB_REPOSITORY"
           done
 

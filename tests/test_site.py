@@ -125,5 +125,14 @@ with contextlib.redirect_stdout(io.StringIO()):
     rc = bs.main(["render", "--data-dir", str(data_dir), "--out", str(root / "site3")])
 check(rc == 0 and (root / "site3" / "index.html").exists(), "render via CLI")
 
+print("== hostile data in a recorded week ==")
+evil = bs.entry_html(repo("a/b", 1, language="<img src=x onerror=alert(1)>", description="x\u202e\u200bevil"))
+check("<img" not in evil and "&lt;img" in evil, "language is HTML-escaped")
+check("\u202e" not in evil and "\u200b" not in evil, "bidi and zero-width characters are dropped from the description")
+for bad_name, bad_link in (("a/b", "javascript:alert(1)"), ("a/b", 'https://github.com/a/b"onmouseover="x'), ("a/b)[x](https://evil.com", "https://github.com/a/b")):
+    h = bs.entry_html({**repo("a/b", 1), "name": bad_name, "link": bad_link})
+    check("<a " not in h and "javascript:" not in h and 'href="' not in h, f"no href unless name and link pass the allowlist: {bad_link!r}")
+check('href="https://github.com/a/b"' in bs.entry_html(repo("a/b", 1)), "a valid repo still links")
+
 tmp.cleanup()
 print(f"\nALL {passed} CHECKS PASSED")

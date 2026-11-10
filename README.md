@@ -31,6 +31,23 @@ The "Decide whether to research" step logs which of these applied.
 
 Each run also records the week under `data/weeks/` and deploys a designed, phone-first page to GitHub Pages with an archive of past weeks. The email's first line links to it. The `publish` job enables Pages on first run; if it fails, enable Pages with source "GitHub Actions" under Settings → Pages. Pages requires the repo to be public on a free plan.
 
+## Remote-controlled inputs
+
+The issue body and the Pages site are rendered for a reader who trusts the automation, so no remote server may put a link, image or other structure into them. This is every string a remote party can influence and the rule that covers it. Adding a source or a sink means adding a row.
+
+| Source | Sink | Rule |
+| --- | --- | --- |
+| Feed `<link>` | repo name and link in digest.md / site | must match `github.com/owner/repo` with a GitHub-name charset (`FEED_LINK_RE`); the link is rebuilt from owner/repo, never taken from the feed; `SAFE_NAME_RE` / `SAFE_LINK_RE` re-check at render time and a failing entry is shown as plain text, not a link |
+| Feed `<description>` | description line | tags stripped, links and bare URLs removed (`strip_links`), `md_escape`; HTML-escaped on the site |
+| API description, language, license | entry line / site | `clean_text`, then `md_escape` (Markdown) or `html.escape` (site) |
+| `briefs.json` fields | brief line / site | `strip_links`, `md_escape`, length caps; HTML-escaped on the site |
+| Bidi, zero-width and tag characters in any text field | what the reader sees | dropped by `clean_text` |
+| Exception text (HTTP reason phrase, XML names) | Actions log | `log()` writes one line with controls removed, so remote text cannot start a `::workflow-command::` line; exception text is never written to digest.md |
+| Response body size (feed and API) | process memory | read capped at 16 MiB (`read_capped`) |
+| Entity expansion, external entities | memory, local files | libexpat's amplification guard; external entities are not resolved |
+
+Not read, so not a sink: `<pubDate>`, the channel title, `<guid>`, `<author>`, `<category>`, response headers.
+
 ## Development
 
     python3 tests/test_digest.py

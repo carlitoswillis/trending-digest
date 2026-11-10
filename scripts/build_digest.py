@@ -45,6 +45,27 @@ REASON_MAX = 160
 VERDICTS = ("Try", "Watch", "Skip")
 
 REPO_LINK_RE = re.compile(r"github\.com/([^/]+)/([^/#?\s]+)")
+# What a feed link must look like before any of it is used: owner and repo are a
+# GitHub-name charset, nothing else, so a name or link built from them is inert
+# in Markdown (no parens, brackets, spaces, backticks, angle brackets). A query or
+# fragment may follow; it is discarded because the link is rebuilt from owner/repo.
+FEED_LINK_RE = re.compile(r"^https?://github\.com/([A-Za-z0-9_.-]{1,100})/([A-Za-z0-9_.-]{1,100})/?(?:[?#]\S*)?$")
+SAFE_LINK_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# Largest response body read from the network (the real feed is ~1 MB). Without a
+# cap the remote server chooses this process's memory.
+MAX_BODY_BYTES = 16 * 1024 * 1024
+# Characters that change what a reader SEES without changing what the text says:
+# bidi marks/overrides/isolates, zero-width and invisible formatting characters, the
+# BOM and the deprecated tag characters. Dropped, not escaped. ZWJ/ZWNJ stay (emoji
+# sequences, Persian) since they can neither reorder nor conceal. ZWSP is this
+# file's own @/# guard and is added after clean_text runs.
+INVISIBLE_RE = re.compile(
+    "[\u00ad\u061c\u180e\u200b\u200e\u200f\u202a-\u202e"
+    "\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb"
+    "\U000e0000-\U000e007f]"
+)
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # Presence in a prior digest is read from entry lines only ("- **[owner/repo](link)**"),
 # so a github.com link quoted inside a description never counts as an entry.
 ENTRY_LINK_RE = re.compile(r"^- \*\*\[[^\]]*\]\((https://github\.com/[^)\s]+)\)", re.M)
@@ -70,7 +91,13 @@ RENDER_KEYS = ("name", "link", "archived", "stars", "language", "license", "desc
 
 
 def log(msg):
-    print(msg, file=sys.stderr)
+    """Write one line to stderr. Messages carry remote text (exception strings copy
+    HTTP reason phrases and XML names), so a newline must not let a remote server
+    start a line of its own: the Actions runner parses a line beginning "::" as a
+    workflow command. Controls and invisible characters are dropped, length capped.
+    """
+    text = INVISIBLE_RE.sub("", CONTROL_RE.sub(" ", str(msg)))
+    print(re.sub(r"\s+", " ", text).strip()[:600], file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- text
@@ -82,7 +109,7 @@ def flatten_html(s):
 
 
 def clean_text(s):
-    return re.sub(r"\s+", " ", s or "").strip()
+    return re.sub(r"\s+", " ", INVISIBLE_RE.sub("", s or "")).strip()
 
 
 def truncate(s, limit=DESC_MAX):
@@ -150,6 +177,7 @@ def md_escape(s, block_start=True):
     would hide the rest of the digest up to the marker's "-->"). Intraword
     underscores (snake_case, URLs) are left alone: they cannot open emphasis in GFM.
     """
+    s = s.replace("\\", "\\\\")  # first: a literal backslash must not escape our own escapes
     if block_start:
         s = MD_BLOCK_START_RE.sub(r"\\\1", s)
         s = MD_ORDERED_START_RE.sub(r"\1\\\2", s)
@@ -196,10 +224,22 @@ def api_headers(token):
     return headers
 
 
+def read_capped(fp, limit=None):
+    """Read at most `limit` bytes (default MAX_BODY_BYTES); refuse a body that keeps going.
+
+    The message is a program constant, so it is safe on paths that carry remote text.
+    """
+    limit = MAX_BODY_BYTES if limit is None else limit
+    data = fp.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"response body exceeds the {limit} byte limit")
+    return data
+
+
 def get_json(url, token=None, timeout=API_TIMEOUT):
     req = urllib.request.Request(url, headers=api_headers(token))
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+        return json.loads(read_capped(r))
 
 
 def fetch_feed(url=FEED_URL):
@@ -208,12 +248,12 @@ def fetch_feed(url=FEED_URL):
     rank is the 1-based position in the feed; the digest is rendered in that order.
     """
     with urllib.request.urlopen(url, timeout=30) as r:
-        root = ET.fromstring(r.read())
+        root = ET.fromstring(read_capped(r))
     items, seen = [], set()
     for item in root.iter("item"):
         link = (item.findtext("link") or "").strip()
-        m = REPO_LINK_RE.search(link)
-        if not m:
+        m = FEED_LINK_RE.match(link)
+        if not m or set(m.group(1)) == {"."} or set(m.group(2)) == {"."}:
             log(f"skipping feed item with unrecognised link: {link!r}")
             continue
         owner, repo = m.group(1), m.group(2)
@@ -448,7 +488,10 @@ def entry_lines(r, brief=None):
     segments omitted, then the `Try` tag (the only code span) when the brief says so.
     """
     new = r["is_new"]
-    name = f"**[{r['name']}]({r['link']})**"
+    if SAFE_NAME_RE.match(str(r["name"])) and SAFE_LINK_RE.match(str(r["link"])):
+        name = f"**[{r['name']}]({r['link']})**"
+    else:  # never build link syntax from a name or URL that fails the allowlist
+        name = f"**{md_escape(clean_text(str(r['name'])), block_start=False)}**"
     if r["archived"]:
         name += " (archived)"
     meta = []
@@ -458,9 +501,9 @@ def entry_lines(r, brief=None):
             s += f" ({fmt_delta(r['delta'])})"
         meta.append(s)
     if r["language"]:
-        meta.append(r["language"])
+        meta.append(md_escape(clean_text(str(r["language"])), block_start=False))
     if r["license"]:
-        meta.append(r["license"])
+        meta.append(md_escape(clean_text(str(r["license"])), block_start=False))
     if not new:
         meta.append(f"{ordinal(r['weeks'])} week")
     line = f"- {name}"

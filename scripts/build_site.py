@@ -102,6 +102,13 @@ def week_slug(day):
     return f"weeks/{day}.html"
 
 
+def head_link(r, name):
+    """The repo name as a link, only when name and URL pass the same allowlist as digest.md."""
+    if bd.SAFE_NAME_RE.match(str(r["name"])) and bd.SAFE_LINK_RE.match(str(r["link"])):
+        return f'<a class="name" href="{esc(r["link"])}">{name}</a>'
+    return f'<span class="name">{name}</span>'
+
+
 def entry_html(r):
     new = r.get("is_new", True)
     brief = r.get("brief")
@@ -127,7 +134,7 @@ def entry_html(r):
         f'<li class="entry" value="{int(rank) if rank else 0}">',
         f'<span class="rank" aria-hidden="true">{int(rank) if rank else ""}</span>',
         '<div class="body">',
-        f'<p class="head"><a class="name" href="{esc(r["link"])}">{name}</a>'
+        f'<p class="head">{head_link(r, name)}'
         + (' <span class="tag">Try</span>' if is_try else "")
         + "</p>",
     ]

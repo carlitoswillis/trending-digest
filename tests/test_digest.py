@@ -686,4 +686,70 @@ check("anthropics/claude-code" in p["present"] and "user-attachments/ass" not in
 p6 = bd.parse_digest(ISSUE_6_BODY)
 check(p6["date"] == D3 and p6["stars"]["anthropics/claude-code"] is None and p6["stars"]["psf/black"] == 41500, "marker parsed")
 
+# ------------------------------------------------- injection hardening (ported)
+# Each check pins one row of the source -> sink table in README.md.
+def feed_xml(*links):
+    from xml.sax.saxutils import escape
+    items = "".join(f"<item><title>t</title><link>{escape(l)}</link><description>d</description></item>" for l in links)
+    return f"<rss><channel>{items}</channel></rss>".encode()
+
+
+_real_urlopen = urllib.request.urlopen
+try:
+    HOSTILE_LINKS = [
+        "https://github.com/a/b)[pwn](https://evil.com",
+        "https://github.com/a/b`x",
+        "https://github.com/a/b<img>",
+        "https://github.com/a)[x](https://evil.com/b",
+        "https://evil.com/?u=github.com/a/b",
+        "https://github.com/../x",
+        "javascript:alert(1)//github.com/a/b",
+    ]
+    urllib.request.urlopen = lambda u, timeout=None, **kw: Resp(feed_xml(*HOSTILE_LINKS, "https://github.com/ok/repo"))
+    got = bd.fetch_feed()
+    check([i["name"] for i in got] == ["ok/repo"], "feed links must be a plain github.com/owner/repo; Markdown-active, foreign and dot-only names are skipped")
+    check(all(bd.SAFE_LINK_RE.match(i["link"]) and bd.SAFE_NAME_RE.match(i["name"]) for i in got), "every kept link and name passes the allowlist")
+
+    urllib.request.urlopen = lambda u, timeout=None, **kw: Resp(b"<rss>" + b"x" * 64 + b"</rss>")
+    old_cap = bd.MAX_BODY_BYTES
+    bd.MAX_BODY_BYTES = 32
+    try:
+        try:
+            bd.fetch_feed()
+            check(False, "oversized feed body must be refused")
+        except ValueError as e:
+            check("exceeds" in str(e), "oversized feed body is refused with a constant message")
+        try:
+            bd.get_json("https://api.github.com/repos/a/b")
+            check(False, "oversized API body must be refused")
+        except ValueError as e:
+            check("exceeds" in str(e), "oversized API body is refused")
+    finally:
+        bd.MAX_BODY_BYTES = old_cap
+finally:
+    urllib.request.urlopen = _real_urlopen
+check(bd.read_capped(io.BytesIO(b"abc"), 3) == b"abc", "a body exactly at the cap is accepted")
+
+BIDI = "safe\u202egro.live//:sptth \u200bev\u200bil\u2066.com\ufeff\U000e0041"
+check(bd.clean_text(BIDI) == "safegro.live//:sptth evil.com", "clean_text drops bidi, zero-width, BOM and tag characters")
+check(bd.clean_text("a\u200db\u200cc") == "a\u200db\u200cc", "ZWJ and ZWNJ are kept (emoji sequences, Persian)")
+check(bd.strip_links(BIDI) == "safegro.live//:sptth evil.com", "descriptions and briefs lose invisible characters through strip_links")
+check(bd.md_escape("\\[click](x)") == "\\\\\\[click](x)", "a literal backslash is escaped so it cannot cancel our own escapes")
+check(bd.md_escape("a\\") == "a\\\\", "a trailing backslash cannot escape what follows it")
+
+_repo = {"name": "a/b", "link": "https://github.com/a/b", "archived": False, "stars": 1, "language": "[Py](https://evil.com)",
+         "license": "<b>x", "description": "", "is_new": True, "weeks": 1, "delta": None}
+line = bd.entry_lines(_repo)[0]
+check("\\[Py]" in line and "&lt;b>" in line, "language and license are escaped, not spliced raw into the entry line: the link bracket is escaped, the raw tag neutralised")
+for bad_name, bad_link in (("a/b)[x](https://evil.com", "https://github.com/a/b"), ("a/b", "https://github.com/a/b) [p](https://evil.com"),
+                           ("a/b", "http://github.com/a/b"), ("a/b", "javascript:alert(1)")):
+    el = bd.entry_lines({**_repo, "name": bad_name, "link": bad_link, "language": None, "license": None})[0]
+    check(not re.search(r"(?<!\\)\[", el), f"render never builds link syntax from a name or URL failing the allowlist: {bad_name!r} {bad_link!r}")
+
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    bd.log("fallback: x/y: HTTPError: HTTP Error 500: Gone\n::set-output name=x::1\r\n::error::pwned\u202e\x1b[2J")
+check(_err.getvalue().count("\n") == 1 and not any(l.lstrip().startswith("::") for l in _err.getvalue().splitlines())
+      and "\x1b" not in _err.getvalue() and "\u202e" not in _err.getvalue(), "log() output is one line, so remote text cannot start a ::workflow-command:: line")
+
 print(f"\nALL {passed} CHECKS PASSED")

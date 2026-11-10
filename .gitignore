@@ -1,4 +1,6 @@
 __pycache__/
+*.pyc
+.DS_Store
 digest.md
 digest.json
 briefs.json
