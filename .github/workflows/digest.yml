@@ -106,16 +106,25 @@ jobs:
           name: digest
 
       - name: File digest as issue (GitHub emails the notification)
+        id: issue
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Trending digest — $(date -u '+%Y-%m-%d')"
-          gh issue create --title "$title" --body-file digest.md --repo "$GITHUB_REPOSITORY"
+          url=$(gh issue create --title "$title" --body-file digest.md --repo "$GITHUB_REPOSITORY")
+          echo "$url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
           # keep the repo tidy: close digests older than the newest 8
           gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "Trending digest" \
             --json number --jq '.[8:][].number' | while read -r n; do
             gh issue close "$n" --repo "$GITHUB_REPOSITORY"
           done
+
+      - name: Lock the new issue (no comments from strangers)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
+        run: gh issue lock "$ISSUE_URL" --reason spam
 
   # Records the week in data/weeks (committed to the branch that ran) and deploys
   # the site. Independent of `file`; a failure here never blocks the email.
