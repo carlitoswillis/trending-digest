@@ -99,35 +99,25 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      contents: read # to check out scripts/file_issue.sh (trusted ref, not the artifact)
       issues: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with:
           name: digest
+          path: build
 
+      # Idempotent and lock-first: reuses today's issue if a prior run filed it,
+      # locks it right after create, then tidies old digests; a cleanup failure
+      # fails the job after the lock, never before it.
       - name: File digest as issue (GitHub emails the notification)
-        id: issue
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          title="Trending digest — $(date -u '+%Y-%m-%d')"
-          url=$(gh issue create --title "$title" --body-file digest.md --repo "$GITHUB_REPOSITORY")
-          echo "$url"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          # keep the repo tidy: close digests older than the newest 8
-          # explicit sort and title match rather than relying on search/list ordering
-          gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
-            --json number,title,createdAt \
-            --jq 'map(select(.title | startswith("Trending digest"))) | sort_by(.createdAt) | reverse | .[8:][].number' \
-            | while read -r n; do
-            gh issue close "$n" --repo "$GITHUB_REPOSITORY"
-          done
-
-      - name: Lock the new issue (no comments from strangers)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_URL: ${{ steps.issue.outputs.url }}
-        run: gh issue lock "$ISSUE_URL" --reason spam
+        run: bash scripts/file_issue.sh build
 
   # Records the week in data/weeks (committed to the branch that ran) and deploys
   # the site. Independent of `file`; a failure here never blocks the email.
