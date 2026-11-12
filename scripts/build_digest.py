@@ -278,24 +278,42 @@ def fetch_repo(owner, repo, token=None):
     return get_json(f"{API}/repos/{owner}/{repo}", token)
 
 
+HISTORY_AUTHOR = "github-actions[bot]"  # the identity the workflow files digests as
+HISTORY_PER_PAGE = 100
+HISTORY_MAX_PAGES = 5
+HISTORY_WANTED = 12  # genuine digests; one per ISO week is used, so this is ample
+
+
 def fetch_history(repository=None, token=None):
-    """Return prior digest issues (title, body, created_at), newest first."""
+    """Return prior digest issues (title, body, created_at), newest first.
+
+    Only issues filed by the workflow's own bot identity count: the repo is public,
+    so a stranger can open issues with any title and body. Pages are followed until
+    enough genuine digests are found, so strangers' issues cannot crowd them out.
+    """
     repository = repository or os.environ.get("GITHUB_REPOSITORY") or DEFAULT_REPOSITORY
-    url = f"{API}/repos/{repository}/issues?state=all&per_page=20&sort=created&direction=desc"
-    issues = get_json(url, token)
-    if not isinstance(issues, list):
-        raise ValueError("issues endpoint did not return a list")
     out = []
-    for issue in issues:
-        if not isinstance(issue, dict) or "pull_request" in issue:
-            continue
-        title = issue.get("title") or ""
-        if title.startswith(ISSUE_TITLE_PREFIX):
-            out.append({
-                "title": title,
-                "body": issue.get("body") or "",
-                "created_at": issue.get("created_at") or "",
-            })
+    for page in range(1, HISTORY_MAX_PAGES + 1):
+        url = (f"{API}/repos/{repository}/issues?state=all&per_page={HISTORY_PER_PAGE}"
+               f"&sort=created&direction=desc&page={page}")
+        issues = get_json(url, token)
+        if not isinstance(issues, list):
+            raise ValueError("issues endpoint did not return a list")
+        for issue in issues:
+            if not isinstance(issue, dict) or "pull_request" in issue:
+                continue
+            user = issue.get("user") or {}
+            if user.get("login") != HISTORY_AUTHOR or user.get("type") != "Bot":
+                continue
+            title = issue.get("title") or ""
+            if title.startswith(ISSUE_TITLE_PREFIX):
+                out.append({
+                    "title": title,
+                    "body": issue.get("body") or "",
+                    "created_at": issue.get("created_at") or "",
+                })
+        if len(out) >= HISTORY_WANTED or len(issues) < HISTORY_PER_PAGE:
+            break
     out.sort(key=lambda i: i["created_at"], reverse=True)
     return out
 

@@ -118,10 +118,13 @@ ISSUE_6_BODY = (
     "<!-- digest-data " + json.dumps({"date": D3, "repos": MARKER_REPOS}, sort_keys=True, separators=(",", ":")) + " -->\n"
 )
 
+BOT = {"login": "github-actions[bot]", "type": "Bot"}
+STRANGER = {"login": "mallory", "type": "User"}
+
 ISSUES = [
-    {"number": 8, "title": f"Trending digest — {D1}", "body": ISSUE_8_BODY, "created_at": f"{D1}T20:05:28Z"},
-    {"number": 7, "title": f"Trending digest — {D2}", "body": ISSUE_7_BODY, "created_at": f"{D2}T19:54:37Z"},
-    {"number": 6, "title": f"Trending digest — {D3}", "body": ISSUE_6_BODY, "created_at": f"{D3}T19:50:00Z"},
+    {"number": 8, "user": BOT, "title": f"Trending digest — {D1}", "body": ISSUE_8_BODY, "created_at": f"{D1}T20:05:28Z"},
+    {"number": 7, "user": BOT, "title": f"Trending digest — {D2}", "body": ISSUE_7_BODY, "created_at": f"{D2}T19:54:37Z"},
+    {"number": 6, "user": BOT, "title": f"Trending digest — {D3}", "body": ISSUE_6_BODY, "created_at": f"{D3}T19:50:00Z"},
     {"number": 5, "title": "Unrelated bug report", "body": "**[psf/black](https://github.com/psf/black)** should be ignored", "created_at": "2026-09-01T00:00:00Z"},
     {"number": 4, "title": "Trending digest — PR", "body": "**[psf/black](https://github.com/psf/black)**", "pull_request": {"url": "x"}, "created_at": "2026-08-31T00:00:00Z"},
 ]
@@ -414,7 +417,7 @@ with run_main(env={"GITHUB_TOKEN": "tok123"}) as r:
         assert c["headers"]["Authorization"] == "Bearer tok123", c
         assert c["timeout"] == 15, c
     check(True, "API headers, Bearer token and 15s timeout on every API call")
-    check(any("state=all&per_page=20&sort=created&direction=desc" in c["url"] for c in api_calls), "issues URL query")
+    check(any("state=all&per_page=100&sort=created&direction=desc&page=1" in c["url"] for c in api_calls), "issues URL query")
     check(not os.path.exists("digest.html"), "no digest.html written")
 
     # ------------------------------------------------ 1a. render round-trips
@@ -585,7 +588,7 @@ with run_main(env={}, feed_fails=True) as r:
 
 # ==================================================== 5. same-day rerun ignored
 print("== same-day rerun does not count today's issue ==")
-ISSUES.insert(0, {"number": 9, "title": f"Trending digest — {TODAY}", "body": ISSUE_6_BODY.replace(D3, TODAY), "created_at": f"{TODAY}T00:00:00Z"})
+ISSUES.insert(0, {"number": 9, "user": BOT, "title": f"Trending digest — {TODAY}", "body": ISSUE_6_BODY.replace(D3, TODAY), "created_at": f"{TODAY}T00:00:00Z"})
 try:
     with run_main(env={}) as r:
         check(r["rc"] == 0 and "10 repos on GitHub Trending this week · 6 new · 4 still trending" in r["text"], "counts unchanged with a same-day issue present")
@@ -595,7 +598,7 @@ finally:
 
 # ============================================ 5b. duplicate past day counts once
 print("== a past day that was run twice counts once ==")
-ISSUES.insert(1, {"number": 10, "title": f"Trending digest — {D1}", "body": ISSUE_8_BODY, "created_at": f"{D1}T23:00:00Z"})
+ISSUES.insert(1, {"number": 10, "user": BOT, "title": f"Trending digest — {D1}", "body": ISSUE_8_BODY, "created_at": f"{D1}T23:00:00Z"})
 try:
     with run_main(env={}) as r:
         check(r["rc"] == 0 and "10 repos on GitHub Trending this week · 6 new · 4 still trending" in r["text"], "counts unchanged with a duplicate past-day issue")
@@ -607,7 +610,7 @@ finally:
 print("== a digest earlier this ISO week does not count as history ==")
 _monday = NOW - timedelta(days=NOW.weekday())
 SAME_WEEK = (_monday if _monday.strftime("%Y-%m-%d") != TODAY else _monday + timedelta(days=1)).strftime("%Y-%m-%d")
-ISSUES.insert(0, {"number": 9, "title": f"Trending digest — {SAME_WEEK}", "body": ISSUE_6_BODY.replace(D3, SAME_WEEK), "created_at": f"{SAME_WEEK}T00:00:00Z"})
+ISSUES.insert(0, {"number": 9, "user": BOT, "title": f"Trending digest — {SAME_WEEK}", "body": ISSUE_6_BODY.replace(D3, SAME_WEEK), "created_at": f"{SAME_WEEK}T00:00:00Z"})
 try:
     with run_main(env={}) as r:
         check(r["rc"] == 0 and "10 repos on GitHub Trending this week · 6 new · 4 still trending" in r["text"], "counts unchanged with a same-week issue present")
@@ -618,7 +621,7 @@ finally:
 # ===================================== 5d. two digests in one past week count once
 print("== two digests on different days of one past week count once ==")
 D1_NEXT = (NOW - timedelta(days=6)).strftime("%Y-%m-%d")
-ISSUES.insert(0, {"number": 10, "title": f"Trending digest — {D1_NEXT}", "body": ISSUE_8_BODY, "created_at": f"{D1_NEXT}T23:00:00Z"})
+ISSUES.insert(0, {"number": 10, "user": BOT, "title": f"Trending digest — {D1_NEXT}", "body": ISSUE_8_BODY, "created_at": f"{D1_NEXT}T23:00:00Z"})
 try:
     with run_main(env={}) as r:
         check(r["rc"] == 0 and "3 prior digest(s)" in r["stdout"] and "TypeScript · 3rd week" in r["text"], "second digest in a past week counted once")
@@ -821,4 +824,33 @@ else:
     rc, calls, out = run_file_issue(lock_fails=True)
     check(rc != 0, "a failed lock fails the job")
 
+
+# ============================================ 10. history trust: own author only, paged
+print("== fetch_history ignores strangers and pages past them ==")
+def history_with_pages(pages):
+    """Run fetch_history against a fake urlopen that serves `pages` (list of issue lists) by ?page=N."""
+    real = urllib.request.urlopen
+    def fake(req, timeout=None, **kw):
+        url = req.full_url if isinstance(req, urllib.request.Request) else req
+        m = re.search(r"[?&]page=(\d+)", url)
+        n = int(m.group(1)) if m else 1
+        return Resp(json.dumps(pages[n - 1] if n <= len(pages) else []).encode())
+    urllib.request.urlopen = fake
+    try:
+        return bd.fetch_history("o/r", None)
+    finally:
+        urllib.request.urlopen = real
+
+def digest_issue(n, user, day="2026-10-05"):
+    return {"number": n, "user": user, "title": f"Trending digest — {day}", "body": f"b{n}", "created_at": f"{day}T00:00:00Z"}
+
+forged = digest_issue(900, STRANGER, "2026-10-12")
+forged["body"] = "<!-- digest-data {\"date\":\"2026-10-12\",\"repos\":{\"evil/repo\":1}} -->"
+got = history_with_pages([[forged, digest_issue(5, BOT)]])
+check([i["body"] for i in got] == ["b5"], "a digest-titled issue by a stranger is not history")
+spam = [{"number": 1000 + i, "user": STRANGER, "title": f"spam {i}", "body": "", "created_at": "2026-11-01T00:00:00Z"} for i in range(100)]
+got = history_with_pages([spam, [digest_issue(5, BOT)]])
+check([i["body"] for i in got] == ["b5"], "100 stranger issues cannot push the real digests out of the window")
+check(history_with_pages([[digest_issue(5, {"login": "github-actions[bot]", "type": "User"})]]) == [],
+      "the bot login alone is not enough when the account type is not Bot")
 print(f"\nALL {passed} CHECKS PASSED")
