@@ -752,4 +752,73 @@ with contextlib.redirect_stderr(_err):
 check(_err.getvalue().count("\n") == 1 and not any(l.lstrip().startswith("::") for l in _err.getvalue().splitlines())
       and "\x1b" not in _err.getvalue() and "\u202e" not in _err.getvalue(), "log() output is one line, so remote text cannot start a ::workflow-command:: line")
 
+
+# ============================================ 9. run lifecycle: scripts/file_issue.sh
+print("== file_issue.sh: lock-first, idempotent, cleanup cannot skip the lock ==")
+import subprocess, shutil, stat
+FILE_ISSUE = SCRIPT.parent / "file_issue.sh"
+FAKE_GH = """#!/bin/bash
+echo "$*" >> "$FAKE_DIR/calls.log"
+case "$1 $2" in
+  "issue list")
+    if [[ "$*" == *"--state all"* ]]; then cat "$FAKE_DIR/list_all.json"
+    else cat "$FAKE_DIR/list_open.json"; fi ;;
+  "issue create") echo "https://github.com/o/r/issues/99" ;;
+  "issue lock") [ -n "$FAKE_LOCK_FAILS" ] && exit 1; exit 0 ;;
+  "issue close") [ -n "$FAKE_CLOSE_FAILS" ] && exit 1; exit 0 ;;
+esac
+"""
+
+def run_file_issue(all_issues=(), open_issues=(), close_fails=False, lock_fails=False):
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "bin").mkdir()
+        gh = d / "bin" / "gh"
+        gh.write_text(FAKE_GH)
+        gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+        (d / "build").mkdir()
+        (d / "build" / "digest.md").write_text("# body\\n")
+        (d / "build" / "digest.json").write_text(json.dumps({"date": "2026-11-09", "repos": []}))
+        (d / "list_all.json").write_text(json.dumps(list(all_issues)))
+        (d / "list_open.json").write_text(json.dumps(list(open_issues)))
+        env = {**os.environ, "PATH": f"{d / 'bin'}:{os.environ['PATH']}", "FAKE_DIR": str(d),
+               "GITHUB_REPOSITORY": "o/r", "GH_TOKEN": "t"}
+        env.pop("GITHUB_OUTPUT", None)
+        if close_fails: env["FAKE_CLOSE_FAILS"] = "1"
+        if lock_fails: env["FAKE_LOCK_FAILS"] = "1"
+        p = subprocess.run(["bash", str(FILE_ISSUE), str(d / "build")], capture_output=True, text=True, env=env, cwd=d)
+        calls = (d / "calls.log").read_text().splitlines() if (d / "calls.log").exists() else []
+        return p.returncode, calls, p.stdout + p.stderr
+
+def verbs(calls):
+    return [" ".join(c.split()[:2]) for c in calls]
+
+TITLE9 = "Trending digest — 2026-11-09"
+old_open = [{"number": n, "title": f"Trending digest — 2026-09-{n:02d}", "createdAt": f"2026-09-{n:02d}T00:00:00Z",
+             "url": f"https://github.com/o/r/issues/{n}"} for n in range(1, 11)]
+
+if not FILE_ISSUE.exists():
+    check(False, "scripts/file_issue.sh exists")
+else:
+    rc, calls, out = run_file_issue(open_issues=old_open)
+    v = verbs(calls)
+    check(rc == 0 and "issue create" in v, "fresh day: issue created")
+    check(v.index("issue lock") == v.index("issue create") + 1 or v[v.index("issue create") + 1] == "issue list", "the lock follows create before any close")
+    check(v.index("issue lock") < v.index("issue close"), "the lock comes before any cleanup close")
+    check(sum(1 for x in v if x == "issue close") == 2, "cleanup closes everything beyond the newest 8 open digests")
+    check(all("--author" in c for c in calls if c.startswith("issue list")), "every listing is restricted to the workflow's own author")
+    check(any(c.startswith("issue create") and TITLE9 in c for c in calls), "title carries the digest date from digest.json")
+
+    rc, calls, out = run_file_issue(open_issues=old_open, close_fails=True)
+    v = verbs(calls)
+    check("issue lock" in v and rc != 0, "a cleanup failure still locks the new issue and then fails the job visibly")
+
+    existing = [{"number": 77, "title": TITLE9, "createdAt": "2026-11-09T15:30:00Z", "url": "https://github.com/o/r/issues/77"}]
+    rc, calls, out = run_file_issue(all_issues=existing, open_issues=existing)
+    check(rc == 0 and "issue create" not in verbs(calls), "rerun for the same day reuses the existing issue instead of filing a duplicate")
+    check(any(c.startswith("issue lock https://github.com/o/r/issues/77") for c in calls), "the reused issue is locked (a prior run may have died before its lock)")
+
+    rc, calls, out = run_file_issue(lock_fails=True)
+    check(rc != 0, "a failed lock fails the job")
+
 print(f"\nALL {passed} CHECKS PASSED")
